@@ -779,7 +779,7 @@ class Trader(object):
                 Trader.logger.info("Stop loss.")
                 self.stoploss_triggered = True
 
-            if not sell_now and not stoploss_triggered:
+            if not sell_now and not self.stoploss_triggered:
                 Trader.logger.info("waiting for sell signal.")
                 return
 
