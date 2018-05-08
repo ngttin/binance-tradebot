@@ -21,7 +21,8 @@ This is an experimental bot for auto trading on Binance Exchange written in Pyth
 2. Clone this repository to your local
 3. Edit `config.py`
 4. Edit `main.py`
-5. Run the bot with `python main.py`, if you want to log the output, you can run it with `python -u main.py 2>&1 | tee logfile`
+5. Copy `sample.tradebot.db` to `tradebot.db` in `database/`
+6. Run the bot with `python main.py`, if you want to log the output, you can run it with `python -u main.py 2>&1 | tee logfile`
 
 ## Features
 
