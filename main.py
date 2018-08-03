@@ -32,8 +32,8 @@ def main():
 
     thread_trader_1.start()
     thread_trader_2.start()
-#    thread_trader_3.start()
-#    thread_trader_4.start()
+    thread_trader_3.start()
+    thread_trader_4.start()
 
     while True:
         logging.debug('Sleep 60 sec...')

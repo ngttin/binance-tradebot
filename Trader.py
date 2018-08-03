@@ -5,11 +5,10 @@ import math
 import sys
 import threading
 import logging
-from queue import Queue, deque
+from Queue import Queue, deque
 import numpy as np
 
-from pyti.hull_moving_average import hull_moving_average
-from pyti.exponential_moving_average import exponential_moving_average
+from pyti.relative_strength_index import relative_strength_index
 
 from binance.client import Client
 from binance.enums import *
@@ -28,7 +27,7 @@ class Trader(object):
     exchange_data = DictMap({})
     db_lock = threading.Lock()
     database = Database()
-    close_prices = deque(maxlen=500)
+    close_prices = deque(maxlen=50)
     symbol_info = DictMap(client.get_symbol_info(symbol=TRADING_PAIR))
     order_queue = Queue()
     order_queue_lock = threading.Lock()
@@ -38,7 +37,6 @@ class Trader(object):
     buy_prices_lock = threading.Lock()
     buying_lock = threading.Lock()
     selling_analyzed_data = DictMap({})
-    buy_now_tracking = False
 
     def __init__(self):
         self.order_id = 0
@@ -111,10 +109,16 @@ class Trader(object):
             ticker = Trader.client.get_orderbook_ticker(symbol=symbol)
             return DictMap(ticker)
 
+        def get_sell_prices(symbol):
+            open_orders = Trader.client.get_open_orders(symbol=symbol)
+            sell_prices = [float(open_order['price']) for open_order in open_orders if open_order['side'] == 'SELL' and open_order['status'] in ['NEW', 'PARTIALLY_FILLED']]
+            return list(set(sell_prices))
+
         order_book = get_order_book(TRADING_PAIR)
         order_book_ticker = get_order_book_ticker(TRADING_PAIR)
+        sell_prices = get_sell_prices(TRADING_PAIR)
 
-        return DictMap({'order_book': order_book, 'ticker': order_book_ticker})
+        return DictMap({'order_book': order_book, 'ticker': order_book_ticker, 'sell_prices': sell_prices})
 
     @staticmethod
     def print_exchange_info():
@@ -170,7 +174,10 @@ class Trader(object):
                 "time": 1499827319559
             }
         """
-        order = Trader.client.get_order(orderId=order_id, symbol=TRADING_PAIR)
+        try:
+            order = Trader.client.get_order(orderId=order_id, symbol=TRADING_PAIR)
+        except:
+            order = {}
         return DictMap(order)
 
     def buy(self, quantity, price):
@@ -178,12 +185,13 @@ class Trader(object):
         Create buy order
         """
         price = self.format_price(price)
+        fmtd_price = '{0:.8f}'.format(price).rstrip('0') # in case, str(price) is in exponential notation
         quantity = self.format_quantity(quantity)
         self.logger.info("Buying %s at %s..." % (str(quantity), str(price)))
         try:     
             order = Trader.client.order_limit_buy(
                        symbol=TRADING_PAIR, quantity=quantity, 
-                       price=price, newOrderRespType='RESULT')
+                       price=fmtd_price, newOrderRespType='RESULT')
         except Exception as e:
             self.logger.exception(e)
             raise
@@ -196,12 +204,13 @@ class Trader(object):
         Create sell order
         """
         price = self.format_price(price)
+        fmtd_price = '{0:.8f}'.format(price).rstrip('0')
         quantity = self.format_quantity(quantity)
         self.logger.info("Selling %s at %s..." % (str(quantity), str(price)))
         try:
             order = Trader.client.order_limit_sell(
                        symbol=TRADING_PAIR, quantity=quantity, 
-                       price=price, newOrderRespType='RESULT')
+                       price=fmtd_price, newOrderRespType='RESULT')
         except Exception as e:
             self.logger.exception(e)
             raise
@@ -221,157 +230,22 @@ class Trader(object):
         self.logger.info("Order %s has been cancelled." % resp['orderId'])
         return resp['orderId']
 
-    @staticmethod
-    def get_market_price():
-        """
-        Get market price
-        """
-        try:
-            ticker = Trader.client.get_symbol_ticker(symbol=TRADING_PAIR)
-        except Exception as e:
-            Trader.logger.exception(e)
-            raise
-        return float(ticker['price'])
-
-    @staticmethod
-    def get_open_24h_price():
-        """
-        Get open price 24h
-        """
-        try:
-            ticker = Trader.client.get_ticker(symbol=TRADING_PAIR)
-        except Exception as e:
-            Trader.logger.exception(e)
-            raise
-        return float(ticker['openPrice'])
-
-    @staticmethod
-    def get_last_close_price(limit=1):
-        """
-        Get recent close price
-        """
-        try:
-            klines = Trader.client.get_klines(symbol=TRADING_PAIR, interval=KLINE_INTERVAL_1MINUTE, limit=limit)
-        except Exception as e:
-            Trader.logger.exception(e)
-            raise
-        close_prices = [float(kline[4]) for kline in klines]
-        if len(close_prices) == 1:
-            return close_prices[0]
-        return close_prices
 
     @staticmethod
     def analyze(signal):
         """
         Analyze data
         """
-        def calc_rsi(prices, n=14):
-            deltas = np.diff(prices)
-            seed = deltas[:n+1]
-            up = seed[seed>=0].sum()/n
-            down = -seed[seed<0].sum()/n
-            rs = up/down
-            rsi = np.zeros_like(prices)
-            rsi[:n] = 100. - 100./(1.+rs)
-            for i in range(n, len(prices)):
-                delta = deltas[i-1] # cause the diff is 1 shorter
-                if delta>0:
-                    upval = delta
-                    downval = 0.
-                else:
-                    upval = 0.
-                    downval = -delta
-                up = (up*(n-1) + upval)/n
-                down = (down*(n-1) + downval)/n
-                rs = up/down
-                rsi[i] = 100. - 100./(1.+rs)
-            return rsi
-        def get_last_peak(data):
-            np_data = np.array(data)
-            peaks = (np_data >= np.roll(np_data, 1)) & (np_data > np.roll(np_data, -1))
-            peaks = list(peaks[1:len(peaks)-1])
-            idx = len(peaks) - peaks[::-1].index(True)
-            return DictMap({'index': idx, 'value': data[idx]})
-        def get_last_trough(data):
-            np_data = np.array(data)
-            troughs = (np_data <= np.roll(np_data, 1)) & (np_data < np.roll(np_data, -1))
-            troughs = list(troughs[1:len(troughs)-1])
-            idx = len(troughs) - troughs[::-1].index(True)
-            return DictMap({'index': idx, 'value': data[idx]})
-
-        data = list(signal)
-        ema = exponential_moving_average(data[-EMA_PERIOD:], EMA_PERIOD)[-1]
-        if Trader.selling_analyzed_data:
-            hull_data = hull_moving_average(data[-(HULL_PERIOD+30):], HULL_PERIOD)
-        else:
-            hull_data = hull_moving_average(data, HULL_PERIOD)
-
-        # @TODO: clean up the code
-        sell_now  = False
-        if not Trader.selling_analyzed_data: # first time
-            hd = [x for x in hull_data if x >= 0]
-            last_peak = get_last_peak(hd)
-            last_trough = get_last_trough(hd)
-            if last_peak.index > last_trough.index:
-                Trader.selling_analyzed_data.last_is_trough = False
-            else:
-                Trader.selling_analyzed_data.last_is_trough = True
-            Trader.selling_analyzed_data.peak = last_peak.value
-            Trader.selling_analyzed_data.trough = last_trough.value
-            Trader.selling_analyzed_data.previous_peak = None
-            Trader.selling_analyzed_data.previous_trough = None
-            Trader.selling_analyzed_data.last = hull_data[-1]
-        else:
-            last = hull_data[-1]
-            height = Trader.selling_analyzed_data.peak - Trader.selling_analyzed_data.trough
-            if Trader.selling_analyzed_data.last_is_trough:
-                retrace_height = last - Trader.selling_analyzed_data.trough
-            else:
-                retrace_height = Trader.selling_analyzed_data.peak - last
-
-            retrace_perc = retrace_height/height * 100.0
-            if Trader.selling_analyzed_data.last_is_trough:
-                if retrace_perc < 0:
-                    Trader.selling_analyzed_data.last_is_trough = False
-                    if Trader.selling_analyzed_data.previous_trough:
-                        Trader.selling_analyzed_data.trough = Trader.selling_analyzed_data.previous_trough
-                if last < Trader.selling_analyzed_data.last:
-                    if retrace_perc > IGNORE_SMALL_PEAK_PERCENTAGE:
-                        Trader.selling_analyzed_data.last_is_trough = False
-                        Trader.selling_analyzed_data.previous_peak = Trader.selling_analyzed_data.peak
-                        Trader.selling_analyzed_data.peak = Trader.selling_analyzed_data.last
-            else:
-                if retrace_perc < 0:
-                    Trader.selling_analyzed_data.last_is_trough = True
-                    if Trader.selling_analyzed_data.previous_peak:
-                        Trader.selling_analyzed_data.peak = Trader.selling_analyzed_data.previous_peak
-                if last > Trader.selling_analyzed_data.last: # got a new reversal
-                    if retrace_perc > IGNORE_SMALL_PEAK_PERCENTAGE:
-                        Trader.selling_analyzed_data.last_is_trough = True
-                        Trader.selling_analyzed_data.previous_trough = Trader.selling_analyzed_data.trough
-                        Trader.selling_analyzed_data.trough = Trader.selling_analyzed_data.last
-                if retrace_perc >= SELL_MAX_RETRACEMENT_PERCENTAGE:
-                    sell_now = True
-            Trader.selling_analyzed_data.last = last
-        Trader.logger.debug("selling analyze data: %s" % str(Trader.selling_analyzed_data))
-
-        rsi = calc_rsi(data[-(RSI_PERIOD+1):], RSI_PERIOD)[-1]
-        ma_spread = 100*(ema/hull_data[-1] - 1)
-        Trader.logger.debug("ema - rsi - ma_spread: %s - %s - %s" % (str(ema), str(rsi), str(ma_spread)))
+        close_prices = list(signal)
+        rsi = relative_strength_index(close_prices, RSI_PERIOD)
+        Trader.logger.debug("RSI: %.2lf" % rsi[-1])
         buy_now = False
-
-        if rsi < RSI_OVERSOLD_PERCENTAGE and ma_spread > MIN_MA_SPREAD and hull_data[-1] <= hull_data[-2]:
-                Trader.buy_now_tracking = True
-        else:
-            if Trader.buy_now_tracking and hull_data[-1] > hull_data[-2] and Trader.selling_analyzed_data.last_is_trough:
-                height = Trader.selling_analyzed_data.peak - Trader.selling_analyzed_data.trough
-                retrace_height = last - Trader.selling_analyzed_data.trough
-                retrace_perc = retrace_height/height * 100.0
-                if retrace_perc >= BUY_MAX_RETRACEMENT_PERCENTAGE:
-                    buy_now = True
-                    Trader.buy_now_tracking = False
-
-        return DictMap({'buy_now': buy_now, 'sell_now': sell_now, 'ema': ema, 'hull': hull_data[-1], 'close': data[-1]})
+        sell_now = False
+        if rsi[-2] <= RSI_OVERSOLD_PERCENTAGE and rsi[-1] > rsi[-2]:
+            buy_now = True
+        if rsi[-1] >= RSI_OVERBOUGHT_PERCENTAGE:
+            sell_now = True
+        return DictMap({'buy_now': buy_now, 'sell_now': sell_now})
 
     @staticmethod
     def analyze_market_data():
@@ -430,6 +304,8 @@ class Trader(object):
                 Trader.order_queue_lock.release()
                 Trader.logger.info("Checking for order #%d status..." % order_id)
                 order_status = Trader.get_order_status(order_id)
+                if not order_status:
+                    continue
                 Trader.logger.info("Order #%s status: %s" % (order_id, order_status.status))
                 Trader.db_lock.acquire()
                 order_data = {'order_id': str(order_id), 'price': order_status.price, 'orig_quantity': order_status.origQty, 
@@ -574,12 +450,12 @@ class Trader(object):
                 break
         optimal_prices = prices[:i]
         tick_size = float(Trader.symbol_info.filters[0]['tickSize'])  
-        buy_price = optimal_prices[-1] 
+        buy_price = optimal_prices[-1]
         while True:
             buy_price = buy_price + tick_size
             if buy_price not in optimal_prices:
                 break
-        buy_price = buy_price + BUY_PRICE_TICK_OFFSET * tick_size
+        buy_price = buy_price + (BUY_PRICE_TICK_OFFSET-1) * tick_size
         if buy_price > last_ask:
             buy_price = last_ask
         return self.format_price(buy_price)
@@ -590,6 +466,7 @@ class Trader(object):
         Calculate sell price
         """
         order_book = self.exchange_data.order_book
+        sell_prices = self.exchange_data.sell_prices # our sell prices in order book
         orders = order_book.asks
         last_bid = float(order_book.bids[0][0])
         quantities = [float(order[1]) for order in orders]
@@ -598,15 +475,19 @@ class Trader(object):
             if sum(quantities[:i]) >= (QUANTITY_COEFFICIENT * INITIAL_AMOUNT/prices[0]):
                 break
         optimal_prices = prices[:i]
-        tick_size = float(Trader.symbol_info.filters[0]['tickSize'])
-        sell_price = optimal_prices[-1] 
-        while True:
-            sell_price = sell_price - tick_size
-            if sell_price not in optimal_prices:
-                break
-        sell_price = sell_price - SELL_PRICE_TICK_OFFSET * tick_size
-        if sell_price < last_bid:
-            sell_price = last_bid
+        cmn_prices = sorted(set(sell_prices)&set(optimal_prices))
+        if cmn_prices:
+            sell_price = cmn_prices[0]
+        else:
+            tick_size = float(Trader.symbol_info.filters[0]['tickSize'])
+            sell_price = optimal_prices[-1]
+            while True:
+                sell_price = sell_price - tick_size
+                if sell_price not in optimal_prices:
+                    break
+            sell_price = sell_price - (SELL_PRICE_TICK_OFFSET-1) * tick_size
+            if sell_price < last_bid:
+                sell_price = last_bid
         return self.format_price(sell_price)
 
 
@@ -642,12 +523,19 @@ class Trader(object):
         else: #sell
             orders = order_book.asks
         lower_price = float(orders[0][0])
+        quantities = [float(order[1]) for order in orders]
+        prices = [float(order[0]) for order in orders]
         if price:
             my_price = float(price)
-            if my_price == float(orders[0][0]) and \
-                           abs(my_price - float(orders[1][0])) > DIFF_TICKS * tick_size:
-                lower_price = float(orders[1][0])
-        quantities = [float(order[1]) for order in orders]
+            try:
+                idx = prices.index(my_price)
+            except:
+                idx = None
+                Trader.logger.debug("my price is not on the book. Set lower_price to my_price")
+                lower_price = my_price
+            if idx and idx < len(prices)-1:
+                if abs(my_price - float(orders[idx+1][0])) > DIFF_TICKS * tick_size:
+                    lower_price = float(orders[idx+1][0])
         for i in range(1, len(quantities)):
             if sum(quantities[:i]) >= (QUANTITY_COEFFICIENT * INITIAL_AMOUNT/lower_price):
                 break
@@ -683,21 +571,15 @@ class Trader(object):
         if not status or status == 'filled' or status == 'cancelled_partially_filled':
             self.order_id = 0
             buy_price = self.calc_buy_price()
+            ask = self.calc_sell_price()
             Trader.buy_prices_lock.acquire()
             buy_prices = Trader.buy_prices
             Trader.buy_prices_lock.release()
                 
             Trader.analyzed_data_lock.acquire()
             buy_now = Trader.analyzed_data.buy_now
-            ema = Trader.analyzed_data.ema
             Trader.analyzed_data_lock.release()
 
-            if not ema:
-                return
-            perc = 100 * (ema/buy_price - 1)
-            Trader.logger.info("ema - buy_price percentage: %.2lf -  buy: %s" % (perc, str(buy_price)))
-            if perc < EMA_TO_BUY_PRICE_PERCENTAGE:
-                return
             if not buy_now:
                 return
             if len(buy_prices) > 0:
@@ -709,6 +591,11 @@ class Trader(object):
                 else:
                     Trader.logger.info("There are incomplete actions. Waiting...")
                     return
+
+            bid_ask_spread = 100.*(ask/buy_price-1)
+            if  bid_ask_spread < BID_ASK_SPREAD:
+                Trader.logger.info("BID:  %s - ASK: %s - SPREAD: %.2lf" % (str(buy_price), str(ask), bid_ask_spread))
+                return
 
             quantity = self.calc_buy_quantity(buy_price)
             try:
@@ -737,10 +624,13 @@ class Trader(object):
                 else:
                     Trader.logger.info("Waiting for order timed out.")
 
+            ask = self.calc_sell_price()
+            bid_ask_spread = 100.*(ask/self.last_buy_price-1)
+
             price_range = self.calc_price_range(side='buy', price=self.last_buy_price)
             self.logger.debug("BUY_ACTION: price_range: %s" % str(price_range))
             # if the price is not in range, cancel and try to place an order again
-            if self.last_buy_price < price_range[0] or self.last_buy_price > price_range[1]:
+            if self.last_buy_price > price_range[0] or self.last_buy_price < price_range[1] or bid_ask_spread < BID_ASK_SPREAD:
                 try:
                     self.cancel(self.order_id)
                 except Exception as e:
@@ -824,15 +714,15 @@ class Trader(object):
                 else:
                     Trader.logger.info("Waiting for filled order timed out.")
 
-            price_range = self.calc_price_range(price=self.last_sell_price)
+            price_range = self.calc_price_range(price=self.last_sell_price, side='sell')
             self.logger.debug("SELL_ACTION: last_sell: %s - sell_price: %s - price_range: %s" % (str(self.last_sell_price),str(sell_price), str(price_range)))
-            if self.is_profitable(sell_price) or self.stoploss_triggered:
-                if self.last_sell_price > price_range[0] or self.last_sell_price < price_range[1]:
-                    try:
-                        self.cancel(self.order_id)
-                    except Exception as e:
-                        Trader.logger.exception(e)
-                        Trader.logger.info("Cannot cancel order #%s. Maybe it has already fully filled." % str(self.order_id))
+            # cancel order that's not profitable anymore
+            if self.last_sell_price < price_range[0] or self.last_sell_price > price_range[1]:
+                try:
+                    self.cancel(self.order_id)
+                except Exception as e:
+                    Trader.logger.exception(e)
+                    Trader.logger.info("Cannot cancel order #%s. Maybe it has already fully filled." % str(self.order_id))
 
 
     def trade(self):

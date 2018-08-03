@@ -1,7 +1,7 @@
 import sys
 sys.path.append('..')
 
-from queue import deque
+from Queue import deque
 import pylab
 from binance.enums import *
 
@@ -14,7 +14,7 @@ client = Trader.client
 class Plot(object):
 
     def get_hist_close(self):
-        klines = client.get_historical_klines(TRADING_PAIR, KLINE_INTERVAL_1MINUTE, "1 day ago UTC")
+        klines = client.get_historical_klines(TRADING_PAIR, KLINE_INTERVAL_1MINUTE, "2 days ago UTC")
         close_prices = [float(kline[4]) for kline in klines]
         return close_prices
 
@@ -31,16 +31,13 @@ class Plot(object):
     def plot(self, action='buy'):
         closes = self.get_hist_close()
         analyzed = self.analyze_all(closes)
-        hull = [x['hull'] for x in analyzed]
-        ema = [x['ema'] for x in analyzed]
-        closes = [x['close'] for x in analyzed]
+        # closes = [x['close'] for x in analyzed]
+        closes = closes[-len(analyzed):]
         buy_indices = [i for i, x in enumerate(analyzed) if x['buy_now']]
-        buy_prices = [hull[x] for x in buy_indices]
+        buy_prices = [closes[x] for x in buy_indices]
         sell_indices = [i for i, x in enumerate(analyzed) if x['sell_now']]
-        sell_prices = [hull[x] for x in sell_indices]
-        x = range(len(hull))
-        pylab.plot(x, hull, label='hull MA')
-        pylab.plot(x, ema, label='exponential MA')
+        sell_prices = [closes[x] for x in sell_indices]
+        x = range(len(closes))
         pylab.plot(x, closes, label='close')
         if action == 'buy':
             pylab.scatter(buy_indices, buy_prices, c='g', label='buying point')
