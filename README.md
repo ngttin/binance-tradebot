@@ -30,15 +30,6 @@ This is an experimental bot for auto trading on Binance Exchange written in Pyth
 + Stop loss implementation
 + Configurable parameters
 
-## How It Works
-
-The strategy for buying is MASPREAD, which is the spread between two moving average lines.
-
-![Buying](img/buy.png)
-**Buying**
-
-![Selling](img/sell.png)
-**Selling**
 
 # Plotting tool
 
@@ -50,3 +41,5 @@ When you change parameters in configuration file, use this tool to observe how t
 
 + Update README.md
 + Add more trading strategies (indicators)
++ Update UI
++ Resume previous trading session
