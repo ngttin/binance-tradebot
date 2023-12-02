@@ -43,3 +43,6 @@ When you change parameters in configuration file, use this tool to observe how t
 + Add more trading strategies (indicators)
 + Update UI
 + Resume previous trading session
+
+# Recommended book
+[Learning Professional Python](https://pdfvault.net/books/learning-professional-python-uytp8o7k) by Bhimavarapu Usharani; Hemanth Jude D.
